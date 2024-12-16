@@ -1,0 +1,49 @@
+name: Update HTML Page
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"  # Run the workflow every 15 minutes
+  push:
+    branches:
+      - main  # Also trigger workflow on pushes to main branch
+
+jobs:
+  update-html:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # Step 2: Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      # Step 3: Install dependencies
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      # Step 4: Run the Python script
+      - name: Run the update script
+        run: |
+          python update_html.py
+
+      # Step 5: Commit and push the updated HTML
+      - name: Commit and push changes
+        run: |
+          git config --local user.name "github-actions"
+          git config --local user.email "actions@github.com"
+          git add index.html
+          git commit -m "Update HTML file" || echo "No changes to commit"
+          git push
+
+      # Step 6: Deploy to GitHub Pages
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: .
