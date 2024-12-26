@@ -6,7 +6,12 @@ from datetime import datetime, timedelta
 import pytz
 import sys
 
+
 def next_quarter_hour(now):
+    """
+    Returns a new datetime rounded up to the next quarter hour: xx:00, xx:15, xx:30, xx:45.
+    For display only, so the user sees when the next scheduled run might be.
+    """
     quarter = now.minute // 15
     if now.minute % 15 == 0 and now.second == 0:
         next_quarter = quarter
@@ -32,7 +37,12 @@ def next_quarter_hour(now):
         day=new_day
     )
 
+
 def fetch_and_process_data():
+    """
+    Fetch the OTE website Excel file, parse it into a DataFrame,
+    clean columns, etc.
+    """
     try:
         url = "https://www.ote-cr.cz/cs/kratkodobe-trhy/elektrina/vnitrodenni-trh"
         response = requests.get(url, timeout=10)
@@ -52,7 +62,6 @@ def fetch_and_process_data():
         file_response = requests.get(file_link, timeout=10)
         file_response.raise_for_status()
 
-        # Read the Excel file
         excel_file = BytesIO(file_response.content)
         df = pd.read_excel(excel_file, header=None)
         if df.empty:
@@ -70,7 +79,7 @@ def fetch_and_process_data():
             .str.replace(" +", " ", regex=True)
         )
 
-        # Drop completely empty rows
+        # Drop rows that are fully empty
         df = df.dropna(how="all")
 
         required_cols = [
@@ -87,6 +96,7 @@ def fetch_and_process_data():
             if c not in df.columns:
                 raise ValueError(f"Missing column '{c}' in DataFrame.")
 
+        # Convert the interval column to string and strip
         df["Časový interval"] = df["Časový interval"].astype(str).str.strip()
 
         return df
@@ -95,7 +105,11 @@ def fetch_and_process_data():
         print(f"Error while fetching/processing data: {e}")
         sys.exit(1)
 
+
 def row_is_empty(row):
+    """
+    Check if all numeric columns are NaN or blank, meaning no real data.
+    """
     num_cols = [
         "Zobchodované množství(MWh)",
         "Zobchodované množství - nákup(MWh)",
@@ -111,8 +125,11 @@ def row_is_empty(row):
             return False
     return True
 
+
 def get_fallback_row(df, start_idx):
-    """Walk backward from start_idx until we find a non-empty row."""
+    """
+    Walk backward from start_idx until we find a non-empty row.
+    """
     for i in range(start_idx, -1, -1):
         row = df.iloc[i]
         if not row_is_empty(row):
@@ -125,11 +142,12 @@ def get_fallback_row(df, start_idx):
     else:
         return None, "No data in DataFrame at all."
 
+
 def get_current_time_block(df):
     """
-    Find the interval covering current CET time. If not found, use the
-    last interval that started before now. If row is empty, fallback
-    to the last non-empty row.
+    Find the row whose time interval covers the current CET time.
+    If none, pick the last interval that started before now.
+    If that row is empty, fallback to older data.
     """
     cet_tz = pytz.timezone("Europe/Prague")
     now = datetime.now(cet_tz).time()
@@ -137,15 +155,17 @@ def get_current_time_block(df):
     valid_rows = []
     for idx, row in df.iterrows():
         interval_str = row["Časový interval"]
+
+        # Skip repeated headers
         if "Perioda" in interval_str or "Časový interval" in interval_str:
             continue
 
         try:
             start_str, end_str = interval_str.split("-")
-            start_str, end_str = start_str.strip(), end_str.strip()
-            st = datetime.strptime(start_str, "%H:%M").time()
-            et = datetime.strptime(end_str, "%H:%M").time()
+            st = datetime.strptime(start_str.strip(), "%H:%M").time()
+            et = datetime.strptime(end_str.strip(), "%H:%M").time()
         except ValueError:
+            # skip un-parseable intervals
             continue
 
         crosses_midnight = (st > et)
@@ -158,14 +178,13 @@ def get_current_time_block(df):
             return None, "No data at all."
 
     matching_idx = None
-    # Instead of storing just `last_before_idx`, store (idx, st) so we can compare `datetime.time` to `datetime.time`
+    # We'll store (idx, start_time) so we can compare time objects
     last_before = None
 
     for (idx, st, et, crosses_midnight) in valid_rows:
-        # Check if "now" is within st..et
         if crosses_midnight:
             # e.g., 23:45-00:00
-            if (now >= st) or (now < et):
+            if now >= st or now < et:
                 matching_idx = idx
                 break
         else:
@@ -178,47 +197,50 @@ def get_current_time_block(df):
             if last_before is None:
                 last_before = (idx, st)
             else:
-                # Compare st to the previously stored time
                 if st > last_before[1]:
                     last_before = (idx, st)
 
-    # If we found an exact match
     if matching_idx is not None:
         row = df.iloc[matching_idx]
         if row_is_empty(row):
             return get_fallback_row(df, matching_idx)
         else:
             return row, ""
-
-    # No exact match, fallback to "last_before" or earliest
-    if last_before is not None:
-        row = df.iloc[last_before[0]]
-        if row_is_empty(row):
-            return get_fallback_row(df, last_before[0])
-        else:
-            msg = (f"No exact match for current time. "
-                   f"Showing last known data from {row['Časový interval']}.")
-            return row, msg
     else:
-        # All intervals start after now
-        first_idx = valid_rows[0][0]
-        row = df.iloc[first_idx]
-        if row_is_empty(row):
-            return get_fallback_row(df, first_idx)
-        msg = (f"All intervals start after {now.strftime('%H:%M')}. "
-               f"Showing earliest interval in data: {row['Časový interval']}.")
-        return row, msg
+        # No exact match
+        if last_before is not None:
+            row = df.iloc[last_before[0]]
+            if row_is_empty(row):
+                return get_fallback_row(df, last_before[0])
+            else:
+                msg = (f"No exact match for current time. "
+                       f"Showing last known data from {row['Časový interval']}.")
+                return row, msg
+        else:
+            # All intervals start after now
+            first_idx = valid_rows[0][0]
+            row = df.iloc[first_idx]
+            if row_is_empty(row):
+                return get_fallback_row(df, first_idx)
+            msg = (f"All intervals start after {now.strftime('%H:%M')}. "
+                   f"Showing earliest interval in data: {row['Časový interval']}.")
+            return row, msg
+
 
 def generate_html(row, fallback_message, output_file="index.html"):
+    """
+    Create the index.html with the same styling as before.
+    """
     cet_tz = pytz.timezone("Europe/Prague")
     now_cet = datetime.now(cet_tz)
     now_str = now_cet.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Round up to next quarter hour
+    # Display next scheduled update as the next quarter hour (purely for UI)
     next_run_cet = next_quarter_hour(now_cet)
     next_run_str = next_run_cet.strftime("%Y-%m-%d %H:%M:%S")
 
     if row is None:
+        # No data scenario
         html_content = f"""<!DOCTYPE html>
 <html lang="cs">
 <head>
@@ -242,6 +264,7 @@ def generate_html(row, fallback_message, output_file="index.html"):
     <p><strong>Last Updated (CET):</strong> {now_str}</p>
     <p class="warning">{fallback_message}</p>
     <p><em>Next scheduled update (approx.): {next_run_str} (CET)</em></p>
+    <!-- Script run at {datetime.utcnow()} UTC -->
 </body>
 </html>"""
     else:
@@ -302,6 +325,7 @@ def generate_html(row, fallback_message, output_file="index.html"):
         f.write(html_content)
     print(f"HTML file '{output_file}' has been generated.")
 
+
 def main():
     print("Fetching data...")
     df = fetch_and_process_data()
@@ -310,8 +334,9 @@ def main():
     row, fallback_msg = get_current_time_block(df)
 
     print("Generating HTML...")
-    generate_html(row, fallback_msg)
+    generate_html(row, fallback_msg, "index.html")
     print("Done.")
+
 
 if __name__ == "__main__":
     main()
