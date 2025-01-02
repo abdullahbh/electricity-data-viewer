@@ -1,11 +1,11 @@
 import requests
+import time
 from bs4 import BeautifulSoup
 import pandas as pd
 from io import BytesIO
 from datetime import datetime, timedelta
 import pytz
 import sys
-
 
 def next_quarter_hour(now):
     """
@@ -156,7 +156,7 @@ def get_current_time_block(df):
     for idx, row in df.iterrows():
         interval_str = row["Časový interval"]
 
-        # Skip repeated headers
+        # Skip repeated headers or invalid lines
         if "Perioda" in interval_str or "Časový interval" in interval_str:
             continue
 
@@ -327,8 +327,34 @@ def generate_html(row, fallback_message, output_file="index.html"):
 
 
 def main():
-    print("Fetching data...")
-    df = fetch_and_process_data()
+    """
+    Main entry point for updating the HTML file. Includes a retry mechanism:
+    If new data is not available, we wait 30s and try again, up to 3 times.
+    """
+    max_retries = 3       # number of retry attempts
+    wait_seconds = 30     # seconds to wait between retries
+
+    df = None
+
+    for attempt in range(1, max_retries + 1):
+        print(f"Fetch attempt {attempt} of {max_retries}...")
+        try:
+            df = fetch_and_process_data()
+        except Exception as e:
+            print(f"Error during data fetch on attempt {attempt}: {e}")
+            df = None
+
+        # Simple check: if df is not empty, assume new data was fetched
+        if df is not None and not df.empty:
+            print("Successfully fetched new (non-empty) data.")
+            break
+
+        # If data is empty or an error occurred, wait & retry
+        if attempt < max_retries:
+            print(f"No new data yet. Retrying in {wait_seconds} seconds...")
+            time.sleep(wait_seconds)
+        else:
+            print("No new data after all retries. Proceeding with fallback logic.")
 
     print("Selecting time block...")
     row, fallback_msg = get_current_time_block(df)
